@@ -686,6 +686,10 @@ const enemyScale = unitScale * 1.4;
 const SQUAD_X = [90, 166, 242, 318];
 const SQUAD_PHASE = [0, 0.55, 1.1, 1.65];
 const SQUAD_COLORS = ['#8a5a24', '#96632a', '#7f521f', '#8e5e27'];
+// Back two units are bowmen (ranged), front two (closest to SQUAD_FRONT_X,
+// i.e. closest to the enemy) are spearmen (melee reach) - a small formation
+// read, and the reason each role gets a distinct Attack animation below.
+const SQUAD_ROLES = ['bow', 'bow', 'spear', 'spear'];
 const GROUND_Y = 320;
 const ENEMY_Y = GROUND_Y - 20;
 const ENEMY_COLOR = '#050505';
@@ -827,8 +831,10 @@ const THROW_TOTAL = THROW_RECOVERY_START + THROW_RECOVERY;
 let throwActive = false;
 let throwElapsed = 0;
 let throwSpearSpawned = false;
+let throwArrowSpawned = false;
 let throwStingerPlayed = false;
-let projectile = null; // { x0, y0, x1, y1 }
+let projectile = null; // spear, { x0, y0, x1, y1 } - thrown by the front (spear) pair
+let arrowProjectile = null; // arrow, same shape - shot by the back (bow) pair
 let impactX = 0; // captured from projectile.x1 at spawn - projectile is null by impact time
 const SPEAR_TARGET_Y = ENEMY_Y - 75;
 
@@ -836,16 +842,19 @@ function triggerAttack() {
   throwActive = true;
   throwElapsed = 0;
   throwSpearSpawned = false;
+  throwArrowSpawned = false;
   throwStingerPlayed = false;
   projectile = null;
+  arrowProjectile = null;
 }
 function doAttack() {
   triggerAttack();
   announce('Attack', COMMAND_COLOR.attack, 0.5);
 }
-// One arm angle drives every squad member's throwing arm in sync so the
-// whole squad reads as throwing together, even though only one projectile
-// is ever spawned per landed sequence (see spawnProjectile).
+// One arm angle drives both spearmen's throwing arm in sync so that pair
+// reads as throwing together, even though only one spear is ever spawned
+// per landed sequence (see spawnProjectile). Bowmen use bowDrawAmountForThrow
+// instead - same throwElapsed timeline, different pose vocabulary.
 function armAngleForThrow(t) {
   if (!throwActive) return Math.sin(t * 1.6) * 0.05;
   const et = throwElapsed;
@@ -853,6 +862,21 @@ function armAngleForThrow(t) {
   if (et < THROW_FLIGHT_START) return lerp(-0.9, 0.6, (et - THROW_WINDUP) / THROW_RELEASE);
   if (et < THROW_RECOVERY_START) return 0.6;
   return lerp(0.6, 0, easeOutCubic(clamp((et - THROW_RECOVERY_START) / THROW_RECOVERY, 0, 1)));
+}
+// Bowstring draw amount (0 = relaxed, 1 = full draw): eases up through the
+// windup, holds at full draw through the brief release beat, then snaps
+// back to 0 fast (a string release is quick, not a slow return) right at
+// THROW_FLIGHT_START where the arrow actually leaves the bow.
+const BOW_SNAP_DURATION = 0.08;
+function bowDrawAmountForThrow() {
+  if (!throwActive) return 0;
+  const et = throwElapsed;
+  if (et < THROW_WINDUP) return easeOutCubic(et / THROW_WINDUP);
+  if (et < THROW_FLIGHT_START) return 1;
+  if (et < THROW_FLIGHT_START + BOW_SNAP_DURATION) {
+    return lerp(1, 0, (et - THROW_FLIGHT_START) / BOW_SNAP_DURATION);
+  }
+  return 0;
 }
 function spawnProjectile() {
   projectile = {
@@ -866,6 +890,22 @@ function projectilePos(p) {
   const y = lerp(projectile.y0, projectile.y1, p) - 40 * Math.sin(Math.PI * p);
   const dx = projectile.x1 - projectile.x0;
   const dy = (projectile.y1 - projectile.y0) - 40 * Math.PI * Math.cos(Math.PI * p);
+  return { x, y, angle: Math.atan2(dy, dx) };
+}
+// Arrow travels the same THROW_FLIGHT window as the spear (both land at
+// THROW_IMPACT_START, only one resolveAttackImpact() ever fires) but flies
+// flatter/faster-reading - a lower arc than the spear's toss.
+function spawnArrowProjectile() {
+  arrowProjectile = {
+    x0: SQUAD_X[1] + 12 * unitScale, y0: GROUND_Y - 44 * unitScale,
+    x1: enemyScreenX() - 20, y1: SPEAR_TARGET_Y - 10
+  };
+}
+function arrowProjectilePos(p) {
+  const x = lerp(arrowProjectile.x0, arrowProjectile.x1, p);
+  const y = lerp(arrowProjectile.y0, arrowProjectile.y1, p) - 16 * Math.sin(Math.PI * p);
+  const dx = arrowProjectile.x1 - arrowProjectile.x0;
+  const dy = (arrowProjectile.y1 - arrowProjectile.y0) - 16 * Math.PI * Math.cos(Math.PI * p);
   return { x, y, angle: Math.atan2(dy, dx) };
 }
 function resolveAttackImpact() {
@@ -913,8 +953,13 @@ function updateAnimTimers(dt) {
       throwSpearSpawned = true;
       spawnProjectile();
     }
+    if (!throwArrowSpawned && throwElapsed >= THROW_FLIGHT_START) {
+      throwArrowSpawned = true;
+      spawnArrowProjectile();
+    }
     if (projectile && throwElapsed >= THROW_IMPACT_START) {
       projectile = null;
+      arrowProjectile = null;
       resolveAttackImpact();
     }
     if (throwElapsed >= THROW_TOTAL) throwActive = false;
@@ -1320,8 +1365,9 @@ function drawEnemyFace(cx, headY, headR, s) {
   ctx.fill();
 }
 // pose = { legSpread, legBend, armIn, lean, crouch } for Idle/March/Guard/
-// Retreat, OR pose = { armThrow } for Attack - the whole body is driven by
-// one of these two vocabularies depending on which fields are present.
+// Retreat, pose = { armThrow } for the spearmen's Attack, OR pose =
+// { bowDraw } for the bowmen's Attack - the whole body is driven by one of
+// these three vocabularies depending on which fields are present.
 // hairStyle/eyeStyle keep tribe vs. enemy visually distinct (brown tuft
 // hair + white-sclera eyes for tribe, dark curl hair + solid red eyes for
 // the enemy) the way the previous stick-figure renderer did.
@@ -1349,11 +1395,26 @@ function drawCreature(x, y, scale, pose, color, hairStyle, eyeStyle, time) {
   ctx.lineWidth = 2.7;
   let handX, handY;
   if (pose.armThrow !== undefined) {
-    // ATTACK pose - throwing arm angle drives hand position
+    // SPEARMAN Attack pose - throwing arm angle drives hand position
     ctx.beginPath(); ctx.moveTo(0, -9); ctx.quadraticCurveTo(-13, -3, -11, 9); ctx.stroke();
     handX = 13 * Math.cos(pose.armThrow - Math.PI / 2 + 0.3);
     handY = -9 + 13 * Math.sin(pose.armThrow - Math.PI / 2 + 0.3) + 6;
     ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(handX, handY); ctx.stroke();
+  } else if (pose.bowDraw !== undefined) {
+    // BOWMAN Attack pose - front arm holds the bow steady out toward the
+    // enemy, back arm pulls the string in toward the chest by bowDraw.
+    const draw = pose.bowDraw;
+    const gripX = 12, gripY = -2;
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.quadraticCurveTo(gripX * 0.5, gripY * 0.5 - 3, gripX, gripY); ctx.stroke();
+    const stringX = lerp(gripX, gripX - 14, draw), stringY = gripY;
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.quadraticCurveTo(stringX * 0.4, gripY * 0.3, stringX, stringY); ctx.stroke();
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(gripX, gripY - 16); ctx.quadraticCurveTo(gripX - 6, gripY, gripX, gripY + 16); ctx.stroke();
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(gripX, gripY - 16); ctx.lineTo(stringX, stringY); ctx.lineTo(gripX, gripY + 16); ctx.stroke();
+    handX = stringX; handY = stringY;
   } else {
     // IDLE / MARCH / GUARD / RETREAT - arms pull toward center by armIn
     const armIn = pose.armIn || 0;
@@ -1420,10 +1481,14 @@ function hopOffset(unitState, time) {
 // leg-stride cycle keeps looping continuously across sequence boundaries
 // instead of restarting/stuttering back to Idle every time a single 1.0s
 // squadAction clip ends; Idle uses a small-amplitude sway; Attack hands off
-// to armAngleForThrow's windup/release/flight/impact timeline and ignores
-// leg pose entirely (per the throw-pose vocabulary).
+// to armAngleForThrow (spearmen) or bowDrawAmountForThrow (bowmen) - see
+// SQUAD_ROLES - and ignores leg pose entirely (per the throw-pose vocabulary).
 function tribePoseFor(t, phase, throwAngle, unitIndex) {
-  if (throwActive) return { armThrow: throwAngle };
+  if (throwActive) {
+    return SQUAD_ROLES[unitIndex] === 'bow'
+      ? { bowDraw: bowDrawAmountForThrow() }
+      : { armThrow: throwAngle };
+  }
   if (squadAction && squadAction.kind === 'guard') {
     const inP = clamp(squadAction.elapsed / 0.2, 0, 1);
     const outP = clamp((squadAction.duration - squadAction.elapsed) / 0.25, 0, 1);
@@ -1452,10 +1517,43 @@ function tribePoseFor(t, phase, throwAngle, unitIndex) {
   const sway = Math.sin(t * 1.3 + phase) * 3;
   return { legSpread: sway * 0.3, legBend: 0, armIn: sway * 0.3, lean: 0, crouch: 0 };
 }
+// Standard-bearer: a tall planted banner beside the frontmost unit (index 3
+// - closest to the enemy) so the squad reads as a formation, not just 4
+// loose fighters. Anchored to a fixed ground position rather than the
+// bearer's own hands/pose - a planted staff, not a swung prop - so it
+// doesn't need to negotiate the arm-pose vocabulary used by Attack/March/
+// Guard/Retreat. Drawn before the squad loop so the units stand in front
+// of/around its base while the pennant, well above head height, still
+// clears every pose.
+function drawFlagBearer(x, y, scale, time) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  ctx.strokeStyle = '#5c4326';
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 16); ctx.lineTo(0, -62); ctx.stroke();
+
+  const flutter = Math.sin(time * 2.2) * 4;
+  ctx.fillStyle = '#ffd76a';
+  ctx.beginPath();
+  ctx.moveTo(0, -62);
+  ctx.lineTo(22 + flutter, -58);
+  ctx.lineTo(16 + flutter * 0.6, -48);
+  ctx.lineTo(22 + flutter, -38);
+  ctx.lineTo(0, -34);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(60,30,10,0.6)';
+  ctx.beginPath(); ctx.arc(10, -48, 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
 function drawSquad(t) {
   // Fixed camera: the squad's screen X never moves - only the world
   // (enemy, decorations) scrolls past them as distanceMarched changes.
   const throwAngle = armAngleForThrow(t);
+  drawFlagBearer(SQUAD_X[3] - 10, GROUND_Y, unitScale, t);
   SQUAD_X.forEach((x, i) => {
     const phase = SQUAD_PHASE[i];
     const pose = tribePoseFor(t, phase, throwAngle, i);
@@ -1541,6 +1639,27 @@ function drawSpearAt(x, y, angle, alpha) {
   ctx.beginPath(); ctx.moveTo(-22, 0); ctx.lineTo(-15, 5); ctx.lineTo(-16, 0); ctx.closePath(); ctx.fill();
   ctx.restore();
 }
+function drawArrowAt(x, y, angle, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.strokeStyle = '#c9a876';
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-16, 0); ctx.lineTo(10, 0);
+  ctx.stroke();
+  ctx.fillStyle = '#8a8f96';
+  ctx.beginPath();
+  ctx.moveTo(10, 0); ctx.lineTo(4, -2.5); ctx.lineTo(4, 2.5);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#e8e0c8';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.moveTo(-16, 0); ctx.lineTo(-11, -3.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-16, 0); ctx.lineTo(-11, 3.5); ctx.stroke();
+  ctx.restore();
+}
 function drawAttackFX() {
   if (projectile) {
     const p = clamp((throwElapsed - THROW_FLIGHT_START) / THROW_FLIGHT, 0, 1);
@@ -1552,6 +1671,17 @@ function drawAttackFX() {
     });
     const pos = projectilePos(p);
     drawSpearAt(pos.x, pos.y, pos.angle, 1);
+  }
+  if (arrowProjectile) {
+    const p = clamp((throwElapsed - THROW_FLIGHT_START) / THROW_FLIGHT, 0, 1);
+    [0.14, 0.08].forEach((back, i) => {
+      const pp = p - back;
+      if (pp < 0) return;
+      const pos = arrowProjectilePos(pp);
+      drawArrowAt(pos.x, pos.y, pos.angle, 0.15 * (i + 1));
+    });
+    const pos = arrowProjectilePos(p);
+    drawArrowAt(pos.x, pos.y, pos.angle, 1);
   }
   const inImpact = throwActive && throwElapsed >= THROW_IMPACT_START && throwElapsed < THROW_RECOVERY_START;
   if (inImpact) {
