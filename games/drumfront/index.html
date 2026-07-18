@@ -931,6 +931,7 @@ function startGame() {
   projectile = null;
   banner = null;
   judgePopup = null;
+  squadHopState = SQUAD_X.map(() => makeHopState(animT));
   state = 'playing';
   overlay.style.display = 'none';
   highBtn.style.display = 'block';
@@ -989,20 +990,6 @@ function buildForestBackground(W, H) {
   b.fillStyle = sky;
   b.fillRect(0, 0, W, GROUND_Y);
 
-  function lightShaft(x, w, alpha) {
-    let g = b.createLinearGradient(x, 0, x + w * 0.4, GROUND_Y);
-    g.addColorStop(0, `rgba(210,200,140,${alpha})`);
-    g.addColorStop(1, 'rgba(210,200,140,0)');
-    b.fillStyle = g;
-    b.beginPath();
-    b.moveTo(x, 0); b.lineTo(x + w, 0);
-    b.lineTo(x + w * 0.15, GROUND_Y); b.lineTo(x - w * 0.15, GROUND_Y);
-    b.closePath(); b.fill();
-  }
-  lightShaft(180, 70, 0.10);
-  lightShaft(430, 90, 0.14);
-  lightShaft(620, 60, 0.09);
-
   b.globalAlpha = 0.55;
   [60, 140, 230, 340, 460, 560, 660, 740].forEach((x, i) => {
     const h = 70 + (i % 3) * 15;
@@ -1054,6 +1041,79 @@ function buildForestBackground(W, H) {
   b.fillRect(0, GROUND_Y + 4, W, 24);
 
   return bg;
+}
+
+// --- Breathing light shafts: moved out of the cached background (see
+// buildForestBackground above, which no longer bakes these in) so alpha can
+// animate per frame - dappled light shifting through moving canopy rather
+// than a fixed static ray. Drawn on the main canvas every frame, on top of
+// the cached background.
+function drawLightShaft(c, x, w, alpha) {
+  let g = c.createLinearGradient(x, 0, x + w * 0.4, GROUND_Y);
+  g.addColorStop(0, `rgba(210,200,140,${alpha})`);
+  g.addColorStop(1, 'rgba(210,200,140,0)');
+  c.fillStyle = g;
+  c.beginPath();
+  c.moveTo(x, 0); c.lineTo(x + w, 0);
+  c.lineTo(x + w * 0.15, GROUND_Y); c.lineTo(x - w * 0.15, GROUND_Y);
+  c.closePath(); c.fill();
+}
+function shaftAlpha(baseAlpha, phaseOffset, time) {
+  return baseAlpha * (0.7 + 0.3 * Math.sin(time * 0.4 + phaseOffset));
+}
+function drawLightShafts(c, time) {
+  drawLightShaft(c, 180, 70, shaftAlpha(0.10, 0, time));
+  drawLightShaft(c, 430, 90, shaftAlpha(0.14, 2.1, time));
+  drawLightShaft(c, 620, 60, shaftAlpha(0.09, 4.3, time));
+}
+
+// --- Ambient mist drift: unlike the world-scroll foliage (which only moves
+// during March), this drifts continuously regardless of March/Idle state -
+// sells "living scene" even while the squad is standing still.
+function drawDriftingMist(c, W, H, groundY, time) {
+  const driftX = (time * 8) % (W + 200) - 100;
+  let mist = c.createLinearGradient(0, groundY - 40, 0, groundY + 20);
+  mist.addColorStop(0, 'rgba(210,220,200,0)');
+  mist.addColorStop(0.5, 'rgba(210,220,200,0.10)');
+  mist.addColorStop(1, 'rgba(210,220,200,0)');
+  c.fillStyle = mist;
+  c.fillRect(driftX, groundY - 40, W, 60);
+  c.fillRect(driftX - (W + 200), groundY - 40, W, 60);
+}
+
+// --- Drifting fireflies: screen-space (not tied to world-scroll), always
+// present as ambient life regardless of game state.
+const FIREFLY_COUNT = 8;
+let fireflies = [];
+function initFireflies(W, H) {
+  fireflies = [];
+  for (let i = 0; i < FIREFLY_COUNT; i++) {
+    fireflies.push({
+      baseX: Math.random() * W,
+      baseY: 100 + Math.random() * (H - 200),
+      wanderRadius: 20 + Math.random() * 30,
+      phaseX: Math.random() * Math.PI * 2,
+      phaseY: Math.random() * Math.PI * 2,
+      speed: 0.3 + Math.random() * 0.3,
+      twinklePhase: Math.random() * Math.PI * 2,
+      twinkleSpeed: 1.5 + Math.random() * 1,
+      size: 1.5 + Math.random() * 1.5,
+    });
+  }
+}
+function drawFireflies(c, time) {
+  fireflies.forEach((f) => {
+    const x = f.baseX + Math.sin(time * f.speed + f.phaseX) * f.wanderRadius;
+    const y = f.baseY + Math.cos(time * f.speed * 0.7 + f.phaseY) * f.wanderRadius * 0.6;
+    const twinkle = 0.4 + 0.6 * Math.abs(Math.sin(time * f.twinkleSpeed + f.twinklePhase));
+    const glow = c.createRadialGradient(x, y, 0, x, y, f.size * 4);
+    glow.addColorStop(0, `rgba(220,240,150,${0.7 * twinkle})`);
+    glow.addColorStop(1, 'rgba(220,240,150,0)');
+    c.fillStyle = glow;
+    c.beginPath(); c.arc(x, y, f.size * 4, 0, Math.PI * 2); c.fill();
+    c.fillStyle = `rgba(240,255,200,${0.9 * twinkle})`;
+    c.beginPath(); c.arc(x, y, f.size, 0, Math.PI * 2); c.fill();
+  });
 }
 
 // --- Scrolling decoration layers: each instance has a fixed world-space X
@@ -1276,13 +1336,42 @@ function drawCreature(x, y, scale, pose, color, hairStyle, eyeStyle, time) {
   if (pose.armThrow !== undefined) return { x: x + handX * scale, y: y + handY * scale };
 }
 
+// --- Per-unit March hop: an occasional small flourish so the squad reads
+// as separate individuals rather than clones. Each unit's timer runs off
+// the continuous animT clock every frame (NOT gated to March state) so the
+// 2-5s intervals stay real independent wall-clock rolls per unit; if the
+// timer were only ticked while actively marching (which happens in short
+// ~1s bursts), most units' timers would go overdue at the same time during
+// idle stretches and then all fire together the moment a march starts -
+// exactly the synced-hop bug this is meant to avoid. Only the render side
+// (hopOffset consulted from tribePoseFor's march branch) is March-only.
+function makeHopState(time) {
+  return { nextHopTime: time + 2 + Math.random() * 3, hopStartTime: 0, isHopping: false };
+}
+let squadHopState = SQUAD_X.map(() => makeHopState(0));
+function updateHop(unitState, time) {
+  if (!unitState.isHopping && time >= unitState.nextHopTime) {
+    unitState.isHopping = true;
+    unitState.hopStartTime = time;
+  }
+  if (unitState.isHopping && time - unitState.hopStartTime > 0.3) {
+    unitState.isHopping = false;
+    unitState.nextHopTime = time + 2 + Math.random() * 3;
+  }
+}
+function hopOffset(unitState, time) {
+  if (!unitState.isHopping) return 0;
+  const p = (time - unitState.hopStartTime) / 0.3;
+  return -Math.sin(p * Math.PI) * 4;
+}
+
 // --- Squad ---
 // State -> pose mapping: legSpread/legBend/armIn driven by a sine wave
 // timed to the beat while March/Retreat is active; Idle uses a small-
 // amplitude sway; Guard eases into a fixed braced pose and holds it;
 // Attack hands off to armAngleForThrow's windup/release/flight/impact
 // timeline and ignores leg pose entirely (per the throw-pose vocabulary).
-function tribePoseFor(t, phase, throwAngle) {
+function tribePoseFor(t, phase, throwAngle, unitIndex) {
   if (throwActive) return { armThrow: throwAngle };
   if (squadAction && squadAction.kind === 'guard') {
     const inP = clamp(squadAction.elapsed / 0.2, 0, 1);
@@ -1298,7 +1387,8 @@ function tribePoseFor(t, phase, throwAngle) {
     const stride = Math.sin(t * legFreq + phase) * 7;
     const legBend = Math.abs(stride) * 0.3;
     if (squadAction.kind === 'march') {
-      return { legSpread: stride, legBend, armIn: -stride * 0.4, lean: 0, crouch: Math.abs(stride) * 0.2 };
+      const hop = hopOffset(squadHopState[unitIndex], t);
+      return { legSpread: stride, legBend, armIn: -stride * 0.4, lean: 0, crouch: Math.abs(stride) * 0.2 + hop };
     }
     return { legSpread: stride, legBend, armIn: stride * 0.3, lean: -0.06, crouch: 0 };
   }
@@ -1311,7 +1401,7 @@ function drawSquad(t) {
   const throwAngle = armAngleForThrow(t);
   SQUAD_X.forEach((x, i) => {
     const phase = SQUAD_PHASE[i];
-    const pose = tribePoseFor(t, phase, throwAngle);
+    const pose = tribePoseFor(t, phase, throwAngle, i);
     drawCreature(x, GROUND_Y, unitScale, pose, SQUAD_COLORS[i], 'tuft', 'tribe');
   });
 }
@@ -1492,6 +1582,9 @@ function drawHPBar(x, y, w, h, pct, color, label) {
 function drawCalibrate() {
   ctx.clearRect(0, 0, W, H);
   ctx.drawImage(forestBg, 0, 0);
+  drawLightShafts(ctx, animT);
+  drawDriftingMist(ctx, W, H, GROUND_Y, animT);
+  drawFireflies(ctx, animT);
   ctx.fillStyle = 'rgba(10,8,20,0.55)';
   ctx.fillRect(0, 0, W, H);
   const now = performance.now();
@@ -1519,7 +1612,10 @@ function drawCalibrate() {
 function drawWorld(t) {
   ctx.clearRect(0, 0, W, H);
   ctx.drawImage(forestBg, 0, 0);
+  drawLightShafts(ctx, t);
+  drawDriftingMist(ctx, W, H, GROUND_Y, t);
   drawMidground();
+  drawFireflies(ctx, t);
   drawSquad(t);
   drawEnemy(t);
   drawAttackFX();
@@ -1537,6 +1633,7 @@ function loop(now) {
   const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
   lastFrameTime = now;
   animT += dt;
+  squadHopState.forEach((hs) => updateHop(hs, animT));
   if (state === 'calibrating') {
     drawCalibrate();
   } else if (state === 'playing') {
@@ -1552,6 +1649,7 @@ function loop(now) {
 }
 
 forestBg = buildForestBackground(W, H);
+initFireflies(W, H);
 handleResize();
 showMenu();
 requestAnimationFrame(loop);
