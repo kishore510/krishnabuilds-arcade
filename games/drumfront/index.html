@@ -1367,7 +1367,10 @@ function drawEnemyFace(cx, headY, headR, s) {
 // pose = { legSpread, legBend, armIn, lean, crouch } for Idle/March/Guard/
 // Retreat, pose = { armThrow } for the spearmen's Attack, OR pose =
 // { bowDraw } for the bowmen's Attack - the whole body is driven by one of
-// these three vocabularies depending on which fields are present.
+// these three vocabularies depending on which fields are present. An
+// optional weaponFlash (0-1) can ride alongside the first vocabulary (used
+// by the enemy's telegraph wind-up) to raise a club in the left hand -
+// orthogonal to which arm-vocabulary is active, not a fourth vocabulary.
 // hairStyle/eyeStyle keep tribe vs. enemy visually distinct (brown tuft
 // hair + white-sclera eyes for tribe, dark curl hair + solid red eyes for
 // the enemy) the way the previous stick-figure renderer did.
@@ -1420,6 +1423,28 @@ function drawCreature(x, y, scale, pose, color, hairStyle, eyeStyle, time) {
     const armIn = pose.armIn || 0;
     ctx.beginPath(); ctx.moveTo(0, -9); ctx.quadraticCurveTo(-13 + armIn, -3, -11 + armIn * 1.5, 9 - legBend * 0.3); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, -9); ctx.quadraticCurveTo(13 - armIn, -3, 12 - armIn * 1.5, 10 - legBend * 0.3); ctx.stroke();
+    if (pose.weaponFlash !== undefined) {
+      // Enemy's telegraph wind-up: a spiked club gripped in the left hand
+      // (the side facing the squad), raising through the same p (0-1) the
+      // rest of the telegraph pose eases on, so the swing and the weapon
+      // reaching full raise land together at the moment the hit resolves.
+      const gx = -11 + armIn * 1.5, gy = 9 - legBend * 0.3;
+      ctx.save();
+      ctx.translate(gx, gy);
+      ctx.rotate(-0.3 - pose.weaponFlash * 1.3);
+      ctx.strokeStyle = '#4a4038';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -22); ctx.stroke();
+      ctx.fillStyle = '#332b24';
+      ctx.beginPath(); ctx.arc(0, -24, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#9a9a9a';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(-4, -27); ctx.lineTo(-7.5, -32); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(4, -27); ctx.lineTo(7.5, -32); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, -29); ctx.lineTo(0, -36); ctx.stroke();
+      ctx.restore();
+    }
   }
 
   ctx.beginPath(); ctx.arc(0, -20, 7, 0, Math.PI * 2); ctx.fill();
@@ -1570,7 +1595,8 @@ function enemyPoseFor(t) {
     const p = clamp((ENEMY_TELEGRAPH_DURATION - enemyCycleTimer) / ENEMY_TELEGRAPH_DURATION, 0, 1);
     return {
       legSpread: lerp(0, 3, p), legBend: lerp(0, 2, p),
-      armIn: lerp(0, -8, p), lean: lerp(0, -0.08, p), crouch: lerp(0, -3, p)
+      armIn: lerp(0, -8, p), lean: lerp(0, -0.08, p), crouch: lerp(0, -3, p),
+      weaponFlash: p
     };
   }
   const sway = Math.sin(t * 1.1) * 3;
