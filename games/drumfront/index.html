@@ -594,6 +594,45 @@ function growFeverOnLanding() {
   }
 }
 
+// --- March momentum: persists across sequence boundaries so the walk-
+// stride animation doesn't stutter back to Idle between back-to-back March
+// landings. Deliberately decoupled from squadAction (which still drives the
+// short 1.0s distanceMarched lerp per landed sequence, unchanged) - the
+// pose now reads isMarchingActive/marchStartTime instead, so the leg cycle
+// keeps looping continuously through sequence boundaries as long as the
+// player keeps landing march-relevant taps within the grace window, rather
+// than reverting to Idle the moment any single sequence's short clip ends.
+let isMarchingActive = false;
+let lastMarchInputTime = 0;
+let marchStartTime = 0; // stride phase runs off this, never reset at
+                         // sequence boundaries, only when momentum restarts
+                         // after having actually broken
+const MARCH_GRACE_PERIOD = BEAT_SEC * 1.5;
+
+// Called after the rolling prefix-filter buffer is updated for a tap that
+// judged Perfect/Good (see handleDrumTap) - candidatesAfterTap is the
+// buffer's current candidate list post-update, justCompletedMarch is true
+// exactly when this tap just landed a full march sequence.
+function onMarchRelevantTap(candidatesAfterTap, currentTime, justCompletedMarch) {
+  const stillMarchCandidate = candidatesAfterTap.includes('march');
+  if (stillMarchCandidate || justCompletedMarch) {
+    if (!isMarchingActive) marchStartTime = currentTime;
+    isMarchingActive = true;
+    lastMarchInputTime = currentTime;
+  } else {
+    // This tap committed the buffer to a non-March command - momentum
+    // breaks immediately rather than fading out over the grace period.
+    isMarchingActive = false;
+  }
+}
+// Grace-period decay for when input actually stops (not committed
+// elsewhere, just nothing arriving) - called every frame during play.
+function updateMarchMomentum(currentTime) {
+  if (isMarchingActive && currentTime - lastMarchInputTime > MARCH_GRACE_PERIOD) {
+    isMarchingActive = false;
+  }
+}
+
 function handleDrumTap(type) {
   if (state !== 'playing') return;
   ensureAudio();
@@ -617,6 +656,7 @@ function handleDrumTap(type) {
     // attempt right away.
     breakFever();
     inputBuffer = [];
+    isMarchingActive = false;
     return;
   }
 
@@ -629,6 +669,9 @@ function handleDrumTap(type) {
   } else {
     inputBuffer = inputBuffer.concat(type);
   }
+
+  const justCompletedMarch = inputBuffer.length === 4 && candidates.length === 1 && candidates[0] === 'march';
+  onMarchRelevantTap(candidates, animT, justCompletedMarch);
 
   if (inputBuffer.length === 4 && candidates.length === 1) {
     executeCommand(candidates[0]);
@@ -891,6 +934,7 @@ function updateAnimTimers(dt) {
 function updateGame(dt) {
   updateAnimTimers(dt);
   updateCombat(dt);
+  updateMarchMomentum(animT);
 }
 
 function showMenu() {
@@ -926,6 +970,9 @@ function startGame() {
   inputBuffer = [];
   feverStreak = 0;
   feverActive = false;
+  isMarchingActive = false;
+  lastMarchInputTime = 0;
+  marchStartTime = 0;
   throwActive = false;
   throwElapsed = 0;
   projectile = null;
@@ -1366,11 +1413,15 @@ function hopOffset(unitState, time) {
 }
 
 // --- Squad ---
-// State -> pose mapping: legSpread/legBend/armIn driven by a sine wave
-// timed to the beat while March/Retreat is active; Idle uses a small-
-// amplitude sway; Guard eases into a fixed braced pose and holds it;
-// Attack hands off to armAngleForThrow's windup/release/flight/impact
-// timeline and ignores leg pose entirely (per the throw-pose vocabulary).
+// State -> pose mapping: Guard eases into a fixed braced pose and holds it;
+// Retreat plays a short squadAction-timed stride clip (one-shot, not
+// chained the way March is); March reads isMarchingActive/marchStartTime
+// (see the march-momentum section above) rather than squadAction, so the
+// leg-stride cycle keeps looping continuously across sequence boundaries
+// instead of restarting/stuttering back to Idle every time a single 1.0s
+// squadAction clip ends; Idle uses a small-amplitude sway; Attack hands off
+// to armAngleForThrow's windup/release/flight/impact timeline and ignores
+// leg pose entirely (per the throw-pose vocabulary).
 function tribePoseFor(t, phase, throwAngle, unitIndex) {
   if (throwActive) return { armThrow: throwAngle };
   if (squadAction && squadAction.kind === 'guard') {
@@ -1382,15 +1433,21 @@ function tribePoseFor(t, phase, throwAngle, unitIndex) {
       armIn: lerp(0, 6, braceP), lean: 0, crouch: lerp(0, 1.5, braceP)
     };
   }
-  if (squadAction && (squadAction.kind === 'march' || squadAction.kind === 'retreat')) {
+  if (squadAction && squadAction.kind === 'retreat') {
     const legFreq = (Math.PI * 2) / BEAT_SEC;
     const stride = Math.sin(t * legFreq + phase) * 7;
     const legBend = Math.abs(stride) * 0.3;
-    if (squadAction.kind === 'march') {
-      const hop = hopOffset(squadHopState[unitIndex], t);
-      return { legSpread: stride, legBend, armIn: -stride * 0.4, lean: 0, crouch: Math.abs(stride) * 0.2 + hop };
-    }
     return { legSpread: stride, legBend, armIn: stride * 0.3, lean: -0.06, crouch: 0 };
+  }
+  if (isMarchingActive) {
+    const legFreq = (Math.PI * 2) / BEAT_SEC;
+    const marchElapsed = t - marchStartTime; // continuous - never resets at
+                                              // sequence boundaries, only
+                                              // when momentum actually broke
+    const stride = Math.sin(marchElapsed * legFreq + phase) * 7;
+    const legBend = Math.abs(stride) * 0.3;
+    const hop = hopOffset(squadHopState[unitIndex], t);
+    return { legSpread: stride, legBend, armIn: -stride * 0.4, lean: 0, crouch: Math.abs(stride) * 0.2 + hop };
   }
   const sway = Math.sin(t * 1.3 + phase) * 3;
   return { legSpread: sway * 0.3, legBend: 0, armIn: sway * 0.3, lean: 0, crouch: 0 };
